@@ -6,6 +6,7 @@ import logging
 import os
 import requests
 import matplotlib.pyplot as plt
+import shutil
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -14,7 +15,13 @@ CHAT_ID = os.getenv("CHAT_ID")
 
 # === CONFIG ===
 LIVE = False  # Switch to True for real trading
-TRADE_SYMBOL = 'BTC/USDT'  # Make sure this is correct for the coin you want to use
+SYMBOLS = [
+    'BTC/USDT',
+    'ETH/USDT',
+    'SOL/USDT',
+    'BNB/USDT',
+    'XRP/USDT'
+]  # Make sure this is correct for the coin you want to use
 TIMEFRAME = '5m'  # Timeframe for the data (e.g., 5 minutes)
 RISK_PER_TRADE = 0.01  # 1% of balance
 TAKE_PROFIT = 0.02  # 2% take profit
@@ -22,16 +29,22 @@ STOP_LOSS = 0.01  # 1% stop loss
 TRADING_FEE = 0.001   # Binance ~0.1%
 INITIAL_BALANCE = 1000
 ENABLE_ALERTS = True
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-CHAT_ID = os.getenv("CHAT_ID")
 ALERT_WEBHOOK = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
 ENABLE_BACKTEST = True # Make sure this is set to True for backtesting
 EXPORT_CSV = True
 PLOT_CHART = True  # Ensure this is set to True to plot the chart after backtest
 
 # === LOGGING ===
-os.makedirs("logs", exist_ok=True)
-logging.basicConfig(filename="logs/trading_log.txt", level=logging.INFO, format='%(asctime)s %(message)s')
+if os.path.exists("logs"):
+    shutil.rmtree("logs")
+
+os.makedirs("logs")
+
+logging.basicConfig(
+    filename="logs/trading_log.txt",
+    level=logging.INFO,
+    format='%(asctime)s %(message)s'
+)
 
 # === INIT BINANCE ===
 api_key = os.getenv("BINANCE_API_KEY")
@@ -72,14 +85,14 @@ def get_balance():
     balance = binance.fetch_balance()
     return balance['USDT']['free']
 
-def place_order(order_type, amount):
+def place_order(symbol, order_type, amount):
     if LIVE:
         if order_type == 'buy':
-            return binance.create_market_buy_order(TRADE_SYMBOL, amount)
+            return binance.create_market_buy_order(symbol, amount)
         else:
-            return binance.create_market_sell_order(TRADE_SYMBOL, amount)
+            return binance.create_market_sell_order(symbol, amount)
     else:
-        print(f"[SIMULATION] {order_type.upper()} {amount} {TRADE_SYMBOL}")
+        print(f"[SIMULATION] {order_type.upper()} {amount} {symbol}")
         return { 'status': 'simulated', 'side': order_type, 'amount': amount }
 
 def trade_signal(df):
@@ -106,7 +119,7 @@ def send_alert(message):
         except Exception as e:
             logging.error(f"Alert failed: {e}")
 
-def backtest(df):
+def backtest(df, symbol):
     trades = []
     holding = False
     entry_price = 0
@@ -168,11 +181,13 @@ def backtest(df):
     print(f"Final Balance: {balance:.2f} USDT")
 
     if EXPORT_CSV:
-        df.to_csv("logs/backtest_data.csv", index=False)
-        pd.DataFrame(trade_results).to_csv("logs/trade_results.csv", index=False)
+        df.to_csv(f"logs/{symbol.replace('/','_')}_data.csv", index=False)
+        pd.DataFrame(trade_results).to_csv(
+            f"logs/{symbol.replace('/','_')}_trades.csv",
+            index=False
+            )
         print("CSV files saved to logs/")
-
-    send_alert(f"Backtest Complete:\nProfit: {profit:.2f} USDT\nWins: {wins}\nLosses: {losses}")
+        send_alert(f"Backtest Complete:\nProfit: {profit:.2f} USDT\nWins: {wins}\nLosses: {losses}")
     
     if PLOT_CHART:
         # Plot the graph here
@@ -222,9 +237,15 @@ def test_telegram_alert():
 
 # === MAIN ===
 if ENABLE_BACKTEST:
-    df = fetch_data(TRADE_SYMBOL, TIMEFRAME)
-    df = apply_indicators(df)
-    backtest(df)
+
+    for symbol in SYMBOLS:
+
+        print(f"\nBacktesting {symbol}")
+
+        df = fetch_data(symbol, TIMEFRAME)
+        df = apply_indicators(df)
+
+        backtest(df, symbol)
 else:
     print("Starting trading bot...")
     holding = False
@@ -233,38 +254,43 @@ else:
 
     while True:
         try:
-            df = fetch_data(TRADE_SYMBOL, TIMEFRAME)
+          for symbol in SYMBOLS:
+
+            df = fetch_data(symbol, TIMEFRAME)
             df = apply_indicators(df)
+
             signal = trade_signal(df)
             price = df.iloc[-1]['close']
 
-            print(f"Coin: {TRADE_SYMBOL}, Price: {price:.2f}, Signal: {signal.upper()}")
-            logging.info(f"Coin: {TRADE_SYMBOL}, Price: {price:.2f}, Signal: {signal.upper()}")
+            print(f"{symbol} | Price: {price:.2f} | Signal: {signal.upper()}")
+
+            print(f"Coin: {symbol}, Price: {price:.2f}, Signal: {signal.upper()}")
+            logging.info(f"Coin: {symbol}, Price: {price:.2f}, Signal: {signal.upper()}")
 
             if signal == 'buy' and not holding:
                 balance = get_balance()
                 trade_amount = (balance * RISK_PER_TRADE) / price
-                order = place_order('buy', round(trade_amount, 6))
+                order = binance.create_market_buy_order(symbol, round(trade_amount,6))
                 entry_price = price
                 holding = True
                 logging.info(f"BUY ORDER: {order}")
-                send_alert(f"Bought {TRADE_SYMBOL} at {price:.2f}")
+                send_alert(f"Bought {symbol} at {price:.2f}")
 
             elif signal == 'sell' and holding:
-                order = place_order('sell', round(trade_amount, 6))
+                order = place_order(symbol, 'sell', round(trade_amount, 6))
                 holding = False
                 logging.info(f"SELL ORDER: {order}")
-                send_alert(f"Sold {TRADE_SYMBOL} at {price:.2f}")
+                send_alert(f"Sold {symbol} at {price:.2f}")
 
             elif holding:
                 if price >= entry_price * (1 + TAKE_PROFIT):
-                    order = place_order('sell', round(trade_amount, 6))
+                    order = place_order(symbol, 'sell', round(trade_amount, 6))
                     holding = False
                     logging.info("TAKE PROFIT triggered")
                     send_alert("Take profit hit")
 
                 elif price <= entry_price * (1 - STOP_LOSS):
-                    order = place_order('sell', round(trade_amount, 6))
+                    order = place_order(symbol, 'sell', round(trade_amount, 6))
                     holding = False
                     logging.info("STOP LOSS triggered")
                     send_alert("Stop loss hit")
